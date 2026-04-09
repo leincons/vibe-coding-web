@@ -404,35 +404,38 @@ async function decryptData(key, ciphertext){
 
 // ── Persistent storage ─────────────────────────────────
 async function savePin(h, pin){
-  // store: hash + fresh salt + a verification token encrypted with the key
-  // so we can detect a wrong PIN on load without exposing data
-  const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
-  cryptoKey  = await deriveKey(pin, salt);
+  const salt  = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+  cryptoKey   = await deriveKey(pin, salt);
   const token = await encryptData(cryptoKey, 'dompet-ok');
-  try{ await window.storage.set('dompet:pin', JSON.stringify({hash:h, salt, token})); }catch(e){}
+  try{ await window.storage.set('dompet:pin', JSON.stringify({hash:h, salt, token})); }catch(e){ console.warn('savePin failed',e); }
 }
 
 async function saveTx(){
   if(!cryptoKey) return;
   try{
-    const plain = JSON.stringify({transactions, nextId});
+    const plain  = JSON.stringify({transactions, nextId});
     const cipher = await encryptData(cryptoKey, plain);
     await window.storage.set('dompet:tx', cipher);
-  }catch(e){}
+  }catch(e){ console.warn('saveTx failed',e); }
 }
 
 async function loadData(){
+  // show a brief loading state on the lock screen
+  document.getElementById('lock-sub').textContent = 'loading…';
   try{
     const pinRes = await window.storage.get('dompet:pin');
-    if(pinRes){
+    if(pinRes && pinRes.value){
       const meta = JSON.parse(pinRes.value);
       pinHash = meta.hash;
-      window._pinMeta = meta; // keep salt+token for key derivation on enter
+      window._pinMeta = meta;
       pinMode = 'enter';
-      document.getElementById('lock-sub').textContent = 'enter your PIN';
+      document.getElementById('lock-sub').textContent = 'welcome back — enter your PIN';
+    } else {
+      document.getElementById('lock-sub').textContent = 'set a 4-digit PIN to secure your wallet';
     }
-  }catch(e){}
-  // transactions loaded after PIN verified — see verifyAndLoad()
+  }catch(e){
+    document.getElementById('lock-sub').textContent = 'set a 4-digit PIN to secure your wallet';
+  }
 }
 
 async function verifyAndLoad(pin){
@@ -442,16 +445,15 @@ async function verifyAndLoad(pin){
     const check = await decryptData(cryptoKey, meta.token);
     if(check !== 'dompet-ok') return false;
   }catch(e){ return false; }
-  // PIN correct — now decrypt transactions
   try{
     const txRes = await window.storage.get('dompet:tx');
-    if(txRes){
+    if(txRes && txRes.value){
       const plain = await decryptData(cryptoKey, txRes.value);
       const d = JSON.parse(plain);
       transactions = d.transactions;
       nextId       = d.nextId;
     }
-  }catch(e){}
+  }catch(e){ console.warn('load tx failed',e); }
   return true;
 }
 
