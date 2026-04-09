@@ -271,19 +271,8 @@ const CAT_COLORS = ['#c9f53b','#f5c842','#ff9f7f','#7fc6ff','#c77dff','#ff6b9d',
 const today = new Date();
 function makeDate(d){ return new Date(currentYear, currentMonth, d).toISOString().split('T')[0]; }
 
-let transactions = [
-  {id:1, desc:'Monthly Salary',     cat:'salary',        type:'income',  amt:8000000, date: makeDate(1)},
-  {id:2, desc:'Freelance project',  cat:'freelance',     type:'income',  amt:2500000, date: makeDate(5)},
-  {id:3, desc:'Grab Food',          cat:'food',          type:'expense', amt:85000,   date: makeDate(3)},
-  {id:4, desc:'Tokopedia order',    cat:'shopping',      type:'expense', amt:350000,  date: makeDate(4)},
-  {id:5, desc:'Electricity bill',   cat:'bills',         type:'expense', amt:420000,  date: makeDate(6)},
-  {id:6, desc:'GoJek commute',      cat:'transport',     type:'expense', amt:55000,   date: makeDate(7)},
-  {id:7, desc:'Makan siang Warung', cat:'food',          type:'expense', amt:35000,   date: makeDate(8)},
-  {id:8, desc:'Netflix',            cat:'entertainment', type:'expense', amt:186000,  date: makeDate(8)},
-  {id:9, desc:'Apotek',             cat:'health',        type:'expense', amt:95000,   date: makeDate(9)},
-  {id:10,desc:'Indomaret snacks',   cat:'food',          type:'expense', amt:67000,   date: makeDate(10)},
-];
-let nextId = 11;
+let transactions = [];
+let nextId = 1;
 
 // ── Helpers ────────────────────────────────────────────
 function fmt(n){ return 'Rp ' + Math.round(n).toLocaleString('id-ID'); }
