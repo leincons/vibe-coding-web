@@ -111,9 +111,53 @@ header{display:flex;align-items:baseline;justify-content:space-between;margin-bo
 .view.active{display:block}
 
 .empty{text-align:center;padding:30px;color:var(--muted);font-size:13px}
+#lockscreen{position:fixed;inset:0;background:var(--bg);z-index:999;display:flex;align-items:center;justify-content:center;flex-direction:column}
+.lock-box{text-align:center;width:280px}
+.lock-logo{font-family:'DM Serif Display',serif;font-size:36px;color:var(--accent);margin-bottom:6px}
+.lock-sub{font-size:12px;color:var(--muted);margin-bottom:32px;font-family:'DM Mono',monospace}
+.lock-dots{display:flex;gap:14px;justify-content:center;margin-bottom:28px}
+.dot{width:14px;height:14px;border-radius:50%;border:1.5px solid var(--border);transition:all .15s}
+.dot.filled{background:var(--accent);border-color:var(--accent)}
+.dot.error{background:var(--red);border-color:var(--red)}
+.pin-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.pin-btn{background:var(--bg2);border:.5px solid var(--border);color:var(--text);height:58px;border-radius:12px;font-size:20px;font-family:'DM Serif Display',serif;cursor:pointer;transition:all .12s}
+.pin-btn:hover{background:var(--bg3);border-color:var(--accent)}
+.pin-btn:active{transform:scale(.94)}
+.pin-btn.del{font-size:14px;color:var(--muted)}
+.lock-msg{font-size:12px;color:var(--muted);margin-top:16px;min-height:18px;font-family:'DM Mono',monospace}
+.lock-msg.err{color:var(--red)}
 </style>
 </head>
 <body>
+<!-- lock screen -->
+<div id="lockscreen">
+  <div class="lock-box">
+    <div class="lock-logo">dompet</div>
+    <div class="lock-sub" id="lock-sub">set a 4-digit PIN to secure your wallet</div>
+    <div class="lock-dots">
+      <div class="dot" id="d0"></div>
+      <div class="dot" id="d1"></div>
+      <div class="dot" id="d2"></div>
+      <div class="dot" id="d3"></div>
+    </div>
+    <div class="pin-grid">
+      <button class="pin-btn" onclick="pinPress('1')">1</button>
+      <button class="pin-btn" onclick="pinPress('2')">2</button>
+      <button class="pin-btn" onclick="pinPress('3')">3</button>
+      <button class="pin-btn" onclick="pinPress('4')">4</button>
+      <button class="pin-btn" onclick="pinPress('5')">5</button>
+      <button class="pin-btn" onclick="pinPress('6')">6</button>
+      <button class="pin-btn" onclick="pinPress('7')">7</button>
+      <button class="pin-btn" onclick="pinPress('8')">8</button>
+      <button class="pin-btn" onclick="pinPress('9')">9</button>
+      <button class="pin-btn del" onclick="pinPress('clr')">clear</button>
+      <button class="pin-btn" onclick="pinPress('0')">0</button>
+      <button class="pin-btn del" onclick="pinPress('del')">&#9003;</button>
+    </div>
+    <div class="lock-msg" id="lock-msg"></div>
+  </div>
+</div>
+
 <div class="app">
 
 <header>
@@ -243,6 +287,174 @@ header{display:flex;align-items:baseline;justify-content:space-between;margin-bo
 </div><!-- end .app -->
 
 <script>
+// ── PIN lock ───────────────────────────────────────────
+let pinBuffer = '';
+let pinHash   = null;
+let pinMode   = 'setup'; // 'setup' | 'confirm' | 'enter'
+let pinFirst  = '';
+
+async function sha256(str){
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+function updateDots(buf, err){
+  for(let i=0;i<4;i++){
+    const d=document.getElementById('d'+i);
+    d.className='dot'+(buf.length>i?' filled':'')+(err?' error':'');
+  }
+}
+
+function setMsg(txt, isErr){
+  const el=document.getElementById('lock-msg');
+  el.textContent=txt;
+  el.className='lock-msg'+(isErr?' err':'');
+}
+
+async function pinPress(k){
+  if(k==='del'){ pinBuffer=pinBuffer.slice(0,-1); updateDots(pinBuffer,false); return; }
+  if(k==='clr'){ pinBuffer=''; updateDots(pinBuffer,false); return; }
+  if(pinBuffer.length>=4) return;
+  pinBuffer+=k;
+  updateDots(pinBuffer,false);
+  if(pinBuffer.length<4) return;
+
+  const h = await sha256(pinBuffer);
+
+  if(pinMode==='setup'){
+    pinFirst=pinBuffer; pinBuffer='';
+    document.getElementById('lock-sub').textContent='confirm your PIN';
+    setMsg('');
+    updateDots('',false);
+    pinMode='confirm';
+    return;
+  }
+  if(pinMode==='confirm'){
+    if(pinBuffer===pinFirst){
+      pinHash=h;
+      await savePin(h, pinBuffer); // derives key + saves encrypted token
+      pinBuffer=''; pinFirst='';
+      unlock();
+    } else {
+      updateDots(pinBuffer,true);
+      setMsg('pins do not match — try again',true);
+      setTimeout(()=>{ pinBuffer=''; pinFirst=''; pinMode='setup';
+        document.getElementById('lock-sub').textContent='set a 4-digit PIN to secure your wallet';
+        setMsg(''); updateDots('',false); },1000);
+    }
+    return;
+  }
+  if(pinMode==='enter'){
+    const ok = await verifyAndLoad(pinBuffer);
+    if(ok){
+      pinBuffer=''; unlock();
+    } else {
+      updateDots(pinBuffer,true);
+      setMsg('wrong PIN',true);
+      setTimeout(()=>{ pinBuffer=''; updateDots('',false); setMsg(''); },800);
+    }
+  }
+}
+
+function unlock(){
+  document.getElementById('lockscreen').style.display='none';
+  refresh();
+}
+
+// ── AES-256-GCM Encryption ─────────────────────────────
+// PIN → PBKDF2 → AES-256-GCM key. Stored data is unreadable without PIN.
+
+let cryptoKey = null; // holds the derived AES key after unlock
+
+async function deriveKey(pin, saltHex){
+  const salt = hexToBytes(saltHex);
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    {name:'PBKDF2', salt, iterations:200000, hash:'SHA-256'},
+    keyMaterial,
+    {name:'AES-GCM', length:256},
+    false, ['encrypt','decrypt']
+  );
+}
+
+function bytesToHex(buf){ return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join(''); }
+function hexToBytes(hex){ return new Uint8Array(hex.match(/.{2}/g).map(h=>parseInt(h,16))); }
+
+async function encryptData(key, plaintext){
+  const iv  = crypto.getRandomValues(new Uint8Array(12));
+  const enc = await crypto.subtle.encrypt(
+    {name:'AES-GCM', iv},
+    key,
+    new TextEncoder().encode(plaintext)
+  );
+  return bytesToHex(iv) + ':' + bytesToHex(enc);
+}
+
+async function decryptData(key, ciphertext){
+  const [ivHex, dataHex] = ciphertext.split(':');
+  const dec = await crypto.subtle.decrypt(
+    {name:'AES-GCM', iv: hexToBytes(ivHex)},
+    key,
+    hexToBytes(dataHex)
+  );
+  return new TextDecoder().decode(dec);
+}
+
+// ── Persistent storage ─────────────────────────────────
+async function savePin(h, pin){
+  // store: hash + fresh salt + a verification token encrypted with the key
+  // so we can detect a wrong PIN on load without exposing data
+  const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+  cryptoKey  = await deriveKey(pin, salt);
+  const token = await encryptData(cryptoKey, 'dompet-ok');
+  try{ await window.storage.set('dompet:pin', JSON.stringify({hash:h, salt, token})); }catch(e){}
+}
+
+async function saveTx(){
+  if(!cryptoKey) return;
+  try{
+    const plain = JSON.stringify({transactions, nextId});
+    const cipher = await encryptData(cryptoKey, plain);
+    await window.storage.set('dompet:tx', cipher);
+  }catch(e){}
+}
+
+async function loadData(){
+  try{
+    const pinRes = await window.storage.get('dompet:pin');
+    if(pinRes){
+      const meta = JSON.parse(pinRes.value);
+      pinHash = meta.hash;
+      window._pinMeta = meta; // keep salt+token for key derivation on enter
+      pinMode = 'enter';
+      document.getElementById('lock-sub').textContent = 'enter your PIN';
+    }
+  }catch(e){}
+  // transactions loaded after PIN verified — see verifyAndLoad()
+}
+
+async function verifyAndLoad(pin){
+  const meta = window._pinMeta;
+  cryptoKey  = await deriveKey(pin, meta.salt);
+  try{
+    const check = await decryptData(cryptoKey, meta.token);
+    if(check !== 'dompet-ok') return false;
+  }catch(e){ return false; }
+  // PIN correct — now decrypt transactions
+  try{
+    const txRes = await window.storage.get('dompet:tx');
+    if(txRes){
+      const plain = await decryptData(cryptoKey, txRes.value);
+      const d = JSON.parse(plain);
+      transactions = d.transactions;
+      nextId       = d.nextId;
+    }
+  }catch(e){}
+  return true;
+}
+
 // ── State ──────────────────────────────────────────────
 let currentMonth = new Date().getMonth();
 let currentYear  = new Date().getFullYear();
@@ -250,25 +462,17 @@ let currentYear  = new Date().getFullYear();
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
 const BUDGETS = {
-  food:          3000000,
-  transport:     1500000,
-  shopping:      2000000,
-  bills:         1200000,
-  entertainment: 800000,
-  health:        500000,
+  food:3000000, transport:1500000, shopping:2000000,
+  bills:1200000, entertainment:800000, health:500000,
 };
-
 const GOALS = [
-  {name:'Emergency Fund',  target:30000000, saved:12000000,  icon:'🛡'},
-  {name:'Laptop Upgrade',  target:15000000, saved:7500000,   icon:'💻'},
-  {name:'Holiday Trip',    target:10000000, saved:2000000,   icon:'✈️'},
+  {name:'Emergency Fund', target:30000000, saved:12000000, icon:'🛡'},
+  {name:'Laptop Upgrade',  target:15000000, saved:7500000,  icon:'💻'},
+  {name:'Holiday Trip',    target:10000000, saved:2000000,  icon:'✈️'},
 ];
-
-const CAT_ICONS = {salary:'💰',freelance:'💼',food:'🍜',transport:'🚗',shopping:'🛍',bills:'⚡',health:'🏥',entertainment:'🎮',savings:'🏦',other:'📦'};
+const CAT_ICONS  = {salary:'💰',freelance:'💼',food:'🍜',transport:'🚗',shopping:'🛍',bills:'⚡',health:'🏥',entertainment:'🎮',savings:'🏦',other:'📦'};
 const CAT_COLORS = ['#c9f53b','#f5c842','#ff9f7f','#7fc6ff','#c77dff','#ff6b9d','#6bffb8','#ffbe0b','#fb5607','#8ecae6'];
 
-// seed data for this month
-const today = new Date();
 function makeDate(d){ return new Date(currentYear, currentMonth, d).toISOString().split('T')[0]; }
 
 let transactions = [];
@@ -311,6 +515,7 @@ function addTx(){
   transactions.push({id:nextId++, desc, cat, type, amt, date});
   document.getElementById('f-desc').value='';
   document.getElementById('f-amt').value='';
+  saveTx();
   refresh();
 }
 
@@ -508,8 +713,8 @@ function refresh(){
   buildHistory();
 }
 
-// init
-refresh();
+// init — load data then show lock screen
+loadData();
 </script>
 </body>
 </html>
